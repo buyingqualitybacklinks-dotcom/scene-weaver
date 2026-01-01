@@ -1,12 +1,25 @@
 import { useCallback, useRef } from 'react';
 
+// Puter.js API types based on https://docs.puter.com/
 declare global {
   interface Window {
     puter: {
       ai: {
-        chat: (prompt: string, options?: { model?: string }) => Promise<{ message: { content: string } }>;
-        txt2img: (prompt: string, options?: { width?: number; height?: number }) => Promise<{ src: string | (() => string) }>;
-        txt2speech: (text: string, options?: { voice?: string }) => Promise<Blob>;
+        // Chat API: Returns ChatResponse with message.content
+        chat: (
+          prompt: string | Array<{ role: string; content: string }>,
+          options?: { model?: string; stream?: boolean }
+        ) => Promise<{ message: { content: string } } | string>;
+        // Image API: Returns HTMLImageElement
+        txt2img: (
+          prompt: string,
+          options?: { model?: string; quality?: string; ratio?: { w: number; h: number }; test_mode?: boolean }
+        ) => Promise<HTMLImageElement>;
+        // TTS API: Returns HTMLAudioElement
+        txt2speech: (
+          text: string,
+          options?: { provider?: string; voice?: string; engine?: string; language?: string; model?: string }
+        ) => Promise<HTMLAudioElement>;
       };
     };
   }
@@ -77,10 +90,12 @@ Example: ["Scene 1 prompt...", "Scene 2 prompt...", ...]`;
       ? `Main Theme: ${mainPrompt}\n\nScript/Narration:\n${script}\n\nGenerate 12 cinematic scene prompts that match this narrative.`
       : `Main Theme: ${mainPrompt}\n\nGenerate 12 cinematic scene prompts that tell a visual story around this theme.`;
 
-    const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { model: 'gpt-4o' });
+    // Using gpt-5-nano as per Puter.js docs (default model)
+    const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { model: 'gpt-5-nano' });
     
     try {
-      const content = response.message.content;
+      // Handle both object response and string response
+      const content = typeof response === 'string' ? response : response.message.content;
       // Extract JSON array from response
       const jsonMatch = content.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
@@ -97,14 +112,33 @@ Example: ["Scene 1 prompt...", "Scene 2 prompt...", ...]`;
     await ensurePuter();
     
     const enhancedPrompt = `${prompt}, vertical 9:16 aspect ratio, cinematic lighting, high quality, professional photography`;
-    const image = await window.puter.ai.txt2img(enhancedPrompt, { width: 576, height: 1024 });
-    // Handle both function and property cases
-    return typeof image.src === 'function' ? image.src() : image.src;
+    
+    // txt2img returns HTMLImageElement directly
+    // Using gpt-image-1-mini (default) with 9:16 ratio
+    const image = await window.puter.ai.txt2img(enhancedPrompt, {
+      model: 'gpt-image-1-mini',
+      quality: 'medium',
+    });
+    
+    // HTMLImageElement.src contains the data URL
+    return image.src;
   }, [ensurePuter]);
 
   const generateSpeech = useCallback(async (text: string): Promise<Blob> => {
     await ensurePuter();
-    return await window.puter.ai.txt2speech(text);
+    
+    // txt2speech returns HTMLAudioElement
+    // Using aws-polly (default) with neural engine for better quality
+    const audio = await window.puter.ai.txt2speech(text, {
+      provider: 'aws-polly',
+      voice: 'Joanna',
+      engine: 'neural',
+      language: 'en-US'
+    });
+    
+    // Convert HTMLAudioElement to Blob for FFmpeg processing
+    const response = await fetch(audio.src);
+    return await response.blob();
   }, [ensurePuter]);
 
   const splitScript = useCallback((script: string, sceneCount: number = 12): string[] => {
