@@ -18,6 +18,7 @@ export interface Scene {
   script: string;
   imageUrl?: string;
   audioBlob?: Blob;
+  audioDuration?: number;
 }
 
 export function usePuter() {
