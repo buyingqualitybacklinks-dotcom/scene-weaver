@@ -26,7 +26,34 @@ export interface GenerationState {
 const VIDEO_WIDTH = 720;
 const VIDEO_HEIGHT = 1280;
 const FRAME_RATE = 24;
-const SCENE_COUNT = 6; // Reduced for memory optimization
+const SCENE_COUNT = 6;
+const TRANSITION_DURATION = 0.5; // seconds
+
+// Available transition types for xfade filter
+const TRANSITION_TYPES = [
+  'fade',
+  'fadeblack', 
+  'fadewhite',
+  'slideleft',
+  'slideright',
+  'slideup',
+  'slidedown',
+  'circlecrop',
+  'rectcrop',
+  'circleopen',
+  'circleclose',
+  'dissolve',
+  'pixelize',
+  'radial',
+  'smoothleft',
+  'smoothright',
+  'smoothup',
+  'smoothdown',
+  'wipeleft',
+  'wiperight',
+  'wipeup',
+  'wipedown',
+];
 
 export function useVideoGeneration() {
   const [state, setState] = useState<GenerationState>({
@@ -280,20 +307,65 @@ export function useVideoGeneration() {
         }
       }
 
-      // Create video concat file
-      console.log('[Video] Concatenating video segments...');
-      const videoList = videoSegments.map(f => `file '${f}'`).join('\n');
-      await ffmpeg.writeFile('videolist.txt', videoList);
-      await ffmpeg.exec([
-        '-f', 'concat', '-safe', '0', '-i', 'videolist.txt',
-        '-c', 'copy', 'video_only.mp4'
-      ]);
+      // Apply xfade transitions between segments
+      console.log('[Video] Applying transitions between scenes...');
+      let currentInput = 'segment0.mp4';
+      
+      for (let i = 1; i < videoSegments.length; i++) {
+        const transitionType = TRANSITION_TYPES[i % TRANSITION_TYPES.length];
+        const prevDuration = scenes[i - 1].audioDuration || 5;
+        const offsetTime = prevDuration - TRANSITION_DURATION;
+        const outputName = i === videoSegments.length - 1 ? 'video_only.mp4' : `trans${i}.mp4`;
+        
+        try {
+          await ffmpeg.exec([
+            '-i', currentInput,
+            '-i', `segment${i}.mp4`,
+            '-filter_complex', `xfade=transition=${transitionType}:duration=${TRANSITION_DURATION}:offset=${offsetTime}`,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            outputName
+          ]);
+          
+          // Clean up previous input if it was a transition output
+          if (currentInput.startsWith('trans')) {
+            await safeDeleteFile(ffmpeg, currentInput);
+          }
+          
+          currentInput = outputName;
+          
+          setState(prev => ({
+            ...prev,
+            progress: 90 + (i * 2 / videoSegments.length),
+          }));
+        } catch (error) {
+          console.error(`[Video] Transition ${i} failed, falling back to concat:`, error);
+          // Fallback: just use concat without transitions
+          const videoList = videoSegments.map(f => `file '${f}'`).join('\n');
+          await ffmpeg.writeFile('videolist.txt', videoList);
+          await ffmpeg.exec([
+            '-f', 'concat', '-safe', '0', '-i', 'videolist.txt',
+            '-c', 'copy', 'video_only.mp4'
+          ]);
+          await safeDeleteFile(ffmpeg, 'videolist.txt');
+          break;
+        }
+      }
+      
+      // Handle single segment case
+      if (videoSegments.length === 1) {
+        await ffmpeg.exec([
+          '-i', 'segment0.mp4',
+          '-c', 'copy',
+          'video_only.mp4'
+        ]);
+      }
       
       // Clean up segment files
       for (const file of videoSegments) {
         await safeDeleteFile(ffmpeg, file);
       }
-      await safeDeleteFile(ffmpeg, 'videolist.txt');
 
       setState(prev => ({ ...prev, progress: 92 }));
 
