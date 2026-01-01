@@ -5,7 +5,7 @@ declare global {
     puter: {
       ai: {
         chat: (prompt: string, options?: { model?: string }) => Promise<{ message: { content: string } }>;
-        txt2img: (prompt: string, options?: { width?: number; height?: number }) => Promise<{ src: () => string }>;
+        txt2img: (prompt: string, options?: { width?: number; height?: number }) => Promise<{ src: string | (() => string) }>;
         txt2speech: (text: string, options?: { voice?: string }) => Promise<Blob>;
       };
     };
@@ -98,7 +98,8 @@ Example: ["Scene 1 prompt...", "Scene 2 prompt...", ...]`;
     
     const enhancedPrompt = `${prompt}, vertical 9:16 aspect ratio, cinematic lighting, high quality, professional photography`;
     const image = await window.puter.ai.txt2img(enhancedPrompt, { width: 576, height: 1024 });
-    return image.src();
+    // Handle both function and property cases
+    return typeof image.src === 'function' ? image.src() : image.src;
   }, [ensurePuter]);
 
   const generateSpeech = useCallback(async (text: string): Promise<Blob> => {
