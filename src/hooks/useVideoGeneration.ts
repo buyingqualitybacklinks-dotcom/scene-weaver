@@ -3,15 +3,6 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 import { usePuter, Scene } from './usePuter';
 
-// Helper to format time as SRT timestamp (HH:MM:SS,mmm)
-function formatSrtTime(seconds: number): string {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 1000);
-  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
-}
-
 export type GenerationStep = 
   | 'idle'
   | 'generating-prompts'
@@ -31,12 +22,18 @@ export interface GenerationState {
   error?: string;
 }
 
+// Optimized settings for browser environment
+const VIDEO_WIDTH = 720;
+const VIDEO_HEIGHT = 1280;
+const FRAME_RATE = 24;
+const SCENE_COUNT = 6; // Reduced for memory optimization
+
 export function useVideoGeneration() {
   const [state, setState] = useState<GenerationState>({
     step: 'idle',
     progress: 0,
     currentScene: 0,
-    totalScenes: 12,
+    totalScenes: SCENE_COUNT,
     scenes: [],
   });
 
@@ -49,30 +46,71 @@ export function useVideoGeneration() {
     const ffmpeg = new FFmpeg();
     const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
     
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-    
-    ffmpegRef.current = ffmpeg;
-    return ffmpeg;
+    try {
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+      
+      ffmpegRef.current = ffmpeg;
+      return ffmpeg;
+    } catch (error) {
+      console.error('FFmpeg load failed:', error);
+      throw new Error('FFmpeg yüklenemedi. Lütfen sayfayı yenileyin ve tekrar deneyin.');
+    }
   }, []);
 
+  // Helper to safely delete FFmpeg files
+  const safeDeleteFile = async (ffmpeg: FFmpeg, filename: string) => {
+    try {
+      await ffmpeg.deleteFile(filename);
+    } catch {
+      // File might not exist, ignore
+    }
+  };
+
+  // Build drawtext filter for subtitles (replaces SRT-based subtitles filter)
+  const buildDrawtextFilter = (scenes: Scene[]): string => {
+    let currentTime = 0;
+    const filters: string[] = [];
+    
+    for (let i = 0; i < scenes.length; i++) {
+      const duration = scenes[i].audioDuration || 5;
+      const startTime = currentTime;
+      const endTime = currentTime + duration;
+      const text = (scenes[i].script || '').trim().replace(/'/g, "\\'").replace(/:/g, "\\:");
+      
+      if (text) {
+        // Shorts-style: bold, white text with black outline, centered at bottom
+        filters.push(
+          `drawtext=text='${text}':fontsize=28:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-120:enable='between(t,${startTime},${endTime})'`
+        );
+      }
+      currentTime = endTime;
+    }
+    
+    return filters.length > 0 ? filters.join(',') : '';
+  };
+
   const generateVideo = useCallback(async (mainPrompt: string, script?: string) => {
+    let ffmpeg: FFmpeg | null = null;
+    
     try {
       setState({
         step: 'generating-prompts',
         progress: 0,
         currentScene: 0,
-        totalScenes: 12,
+        totalScenes: SCENE_COUNT,
         scenes: [],
       });
 
-      // Step 1: Generate scene prompts
+      // Step 1: Generate scene prompts (reduced to SCENE_COUNT for memory)
+      console.log('[Video] Generating prompts...');
       const scenePrompts = await puter.generateScenePrompts(mainPrompt, script);
-      const scriptChunks = puter.splitScript(script || '', 12);
+      const limitedPrompts = scenePrompts.slice(0, SCENE_COUNT);
+      const scriptChunks = puter.splitScript(script || '', SCENE_COUNT);
       
-      const scenes: Scene[] = scenePrompts.map((prompt, i) => ({
+      const scenes: Scene[] = limitedPrompts.map((prompt, i) => ({
         id: i,
         prompt,
         script: scriptChunks[i] || '',
@@ -83,48 +121,61 @@ export function useVideoGeneration() {
         step: 'generating-images',
         progress: 10,
         scenes,
+        totalScenes: scenes.length,
       }));
 
       // Step 2: Generate images
+      console.log('[Video] Generating images...');
       for (let i = 0; i < scenes.length; i++) {
-        const imageUrl = await puter.generateImage(scenes[i].prompt);
-        scenes[i].imageUrl = imageUrl;
-        
-        setState(prev => ({
-          ...prev,
-          currentScene: i + 1,
-          progress: 10 + (i + 1) * 5,
-          scenes: [...scenes],
-        }));
+        try {
+          const imageUrl = await puter.generateImage(scenes[i].prompt);
+          scenes[i].imageUrl = imageUrl;
+          
+          setState(prev => ({
+            ...prev,
+            currentScene: i + 1,
+            progress: 10 + (i + 1) * (40 / scenes.length),
+            scenes: [...scenes],
+          }));
+        } catch (error) {
+          console.error(`[Video] Image ${i} generation failed:`, error);
+          throw new Error(`Görsel ${i + 1} oluşturulamadı: ${error instanceof Error ? error.message : 'Bilinmeyen hata'}`);
+        }
       }
 
       setState(prev => ({
         ...prev,
         step: 'generating-audio',
-        progress: 70,
+        progress: 50,
       }));
 
       // Step 3: Generate TTS audio for each scene and get durations
+      console.log('[Video] Generating audio...');
       for (let i = 0; i < scenes.length; i++) {
         if (scenes[i].script) {
-          const audioBlob = await puter.generateSpeech(scenes[i].script);
-          scenes[i].audioBlob = audioBlob;
-          
-          // Get audio duration
-          const audioUrl = URL.createObjectURL(audioBlob);
-          const audio = new Audio(audioUrl);
-          await new Promise<void>((resolve) => {
-            audio.onloadedmetadata = () => {
-              scenes[i].audioDuration = audio.duration || 5;
-              URL.revokeObjectURL(audioUrl);
-              resolve();
-            };
-            audio.onerror = () => {
-              scenes[i].audioDuration = 5; // fallback
-              URL.revokeObjectURL(audioUrl);
-              resolve();
-            };
-          });
+          try {
+            const audioBlob = await puter.generateSpeech(scenes[i].script);
+            scenes[i].audioBlob = audioBlob;
+            
+            // Get audio duration
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            await new Promise<void>((resolve) => {
+              audio.onloadedmetadata = () => {
+                scenes[i].audioDuration = audio.duration || 5;
+                URL.revokeObjectURL(audioUrl);
+                resolve();
+              };
+              audio.onerror = () => {
+                scenes[i].audioDuration = 5; // fallback
+                URL.revokeObjectURL(audioUrl);
+                resolve();
+              };
+            });
+          } catch (error) {
+            console.error(`[Video] Audio ${i} generation failed:`, error);
+            scenes[i].audioDuration = 5; // fallback on error
+          }
         } else {
           scenes[i].audioDuration = 5; // default 5 seconds for scenes without script
         }
@@ -132,7 +183,7 @@ export function useVideoGeneration() {
         setState(prev => ({
           ...prev,
           currentScene: i + 1,
-          progress: 70 + (i + 1) * 1.5,
+          progress: 50 + (i + 1) * (20 / scenes.length),
           scenes: [...scenes],
         }));
       }
@@ -140,106 +191,177 @@ export function useVideoGeneration() {
       setState(prev => ({
         ...prev,
         step: 'assembling-video',
-        progress: 88,
+        progress: 70,
       }));
 
       // Step 4: Assemble video with FFmpeg
-      const ffmpeg = await loadFFmpeg();
+      console.log('[Video] Loading FFmpeg...');
+      ffmpeg = await loadFFmpeg();
       
       // Write images to FFmpeg virtual filesystem
+      console.log('[Video] Writing images...');
       for (let i = 0; i < scenes.length; i++) {
         if (scenes[i].imageUrl) {
-          const response = await fetch(scenes[i].imageUrl!);
-          const imageData = await response.arrayBuffer();
-          await ffmpeg.writeFile(`image${i}.png`, new Uint8Array(imageData));
+          try {
+            const response = await fetch(scenes[i].imageUrl!);
+            const imageData = await response.arrayBuffer();
+            await ffmpeg.writeFile(`image${i}.png`, new Uint8Array(imageData));
+          } catch (error) {
+            console.error(`[Video] Failed to write image ${i}:`, error);
+            throw new Error(`Görsel ${i + 1} işlenemedi`);
+          }
         }
       }
 
       // Write audio files and concatenate them
-      let totalDuration = 0;
+      console.log('[Video] Writing audio files...');
       const audioInputs: string[] = [];
       for (let i = 0; i < scenes.length; i++) {
         if (scenes[i].audioBlob) {
-          const audioData = await scenes[i].audioBlob!.arrayBuffer();
-          await ffmpeg.writeFile(`audio${i}.mp3`, new Uint8Array(audioData));
-          audioInputs.push(`audio${i}.mp3`);
+          try {
+            const audioData = await scenes[i].audioBlob!.arrayBuffer();
+            await ffmpeg.writeFile(`audio${i}.mp3`, new Uint8Array(audioData));
+            audioInputs.push(`audio${i}.mp3`);
+          } catch (error) {
+            console.error(`[Video] Failed to write audio ${i}:`, error);
+          }
         }
-        totalDuration += scenes[i].audioDuration || 5;
       }
 
       // Create audio concat file
       if (audioInputs.length > 0) {
+        console.log('[Video] Concatenating audio...');
         const audioList = audioInputs.map(f => `file '${f}'`).join('\n');
         await ffmpeg.writeFile('audiolist.txt', audioList);
         await ffmpeg.exec([
           '-f', 'concat', '-safe', '0', '-i', 'audiolist.txt',
           '-c', 'copy', 'combined_audio.mp3'
         ]);
-      }
-
-      // Generate SRT subtitles with dynamic timing
-      let srtContent = '';
-      let currentTime = 0;
-      for (let i = 0; i < scenes.length; i++) {
-        if (scenes[i].script) {
-          const startTime = formatSrtTime(currentTime);
-          const endTime = formatSrtTime(currentTime + (scenes[i].audioDuration || 5));
-          srtContent += `${i + 1}\n${startTime} --> ${endTime}\n${scenes[i].script.trim()}\n\n`;
+        
+        // Clean up individual audio files
+        for (const file of audioInputs) {
+          await safeDeleteFile(ffmpeg, file);
         }
-        currentTime += scenes[i].audioDuration || 5;
+        await safeDeleteFile(ffmpeg, 'audiolist.txt');
       }
-      await ffmpeg.writeFile('subtitles.srt', srtContent);
 
-      // Create video with each image shown for its audio duration
-      // First create individual clips then concat
+      setState(prev => ({ ...prev, progress: 75 }));
+
+      // Create video segments with optimized settings
+      console.log('[Video] Creating video segments...');
       const videoSegments: string[] = [];
       for (let i = 0; i < scenes.length; i++) {
         const duration = scenes[i].audioDuration || 5;
-        await ffmpeg.exec([
-          '-loop', '1', '-t', String(duration),
-          '-i', `image${i}.png`,
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2',
-          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '30',
-          `segment${i}.mp4`
-        ]);
-        videoSegments.push(`segment${i}.mp4`);
+        
+        try {
+          await ffmpeg.exec([
+            '-loop', '1', 
+            '-t', String(duration),
+            '-i', `image${i}.png`,
+            '-vf', `scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast', // Faster encoding
+            '-pix_fmt', 'yuv420p',
+            '-r', String(FRAME_RATE),
+            `segment${i}.mp4`
+          ]);
+          videoSegments.push(`segment${i}.mp4`);
+          
+          // Clean up image after processing
+          await safeDeleteFile(ffmpeg, `image${i}.png`);
+          
+          setState(prev => ({
+            ...prev,
+            progress: 75 + (i + 1) * (15 / scenes.length),
+          }));
+        } catch (error) {
+          console.error(`[Video] Segment ${i} creation failed:`, error);
+          throw new Error(`Video segmenti ${i + 1} oluşturulamadı`);
+        }
       }
 
       // Create video concat file
+      console.log('[Video] Concatenating video segments...');
       const videoList = videoSegments.map(f => `file '${f}'`).join('\n');
       await ffmpeg.writeFile('videolist.txt', videoList);
       await ffmpeg.exec([
         '-f', 'concat', '-safe', '0', '-i', 'videolist.txt',
         '-c', 'copy', 'video_only.mp4'
       ]);
-
-      // Combine video with audio and burn in subtitles (Shorts-style: bold, centered, bottom)
-      const hasAudio = audioInputs.length > 0;
-      const subtitleFilter = "subtitles=subtitles.srt:force_style='Fontsize=24,Bold=1,Alignment=2,MarginV=80,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1'";
       
-      if (hasAudio) {
-        await ffmpeg.exec([
-          '-i', 'video_only.mp4',
-          '-i', 'combined_audio.mp3',
-          '-vf', subtitleFilter,
-          '-c:v', 'libx264', '-c:a', 'aac',
-          '-shortest', '-pix_fmt', 'yuv420p',
-          'output.mp4'
-        ]);
-      } else {
-        await ffmpeg.exec([
-          '-i', 'video_only.mp4',
-          '-vf', subtitleFilter,
-          '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-          'output.mp4'
-        ]);
+      // Clean up segment files
+      for (const file of videoSegments) {
+        await safeDeleteFile(ffmpeg, file);
+      }
+      await safeDeleteFile(ffmpeg, 'videolist.txt');
+
+      setState(prev => ({ ...prev, progress: 92 }));
+
+      // Build drawtext filter for subtitles (browser-compatible, no font dependencies)
+      console.log('[Video] Adding subtitles and finalizing...');
+      const hasAudio = audioInputs.length > 0;
+      const drawtextFilter = buildDrawtextFilter(scenes);
+      
+      try {
+        if (hasAudio && drawtextFilter) {
+          await ffmpeg.exec([
+            '-i', 'video_only.mp4',
+            '-i', 'combined_audio.mp3',
+            '-vf', drawtextFilter,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-c:a', 'aac',
+            '-shortest',
+            '-pix_fmt', 'yuv420p',
+            'output.mp4'
+          ]);
+        } else if (hasAudio) {
+          await ffmpeg.exec([
+            '-i', 'video_only.mp4',
+            '-i', 'combined_audio.mp3',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-shortest',
+            'output.mp4'
+          ]);
+        } else if (drawtextFilter) {
+          await ffmpeg.exec([
+            '-i', 'video_only.mp4',
+            '-vf', drawtextFilter,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            'output.mp4'
+          ]);
+        } else {
+          // Just copy the video if no audio and no subtitles
+          await ffmpeg.exec([
+            '-i', 'video_only.mp4',
+            '-c', 'copy',
+            'output.mp4'
+          ]);
+        }
+      } catch (error) {
+        console.error('[Video] Final assembly failed:', error);
+        throw new Error('Video birleştirme başarısız oldu');
       }
 
+      // Clean up intermediate files
+      await safeDeleteFile(ffmpeg, 'video_only.mp4');
+      await safeDeleteFile(ffmpeg, 'combined_audio.mp3');
+
+      setState(prev => ({ ...prev, progress: 98 }));
+
+      console.log('[Video] Reading output...');
       const data = await ffmpeg.readFile('output.mp4');
       const blobParts: BlobPart[] = typeof data === 'string' ? [data] : [new Uint8Array(data).buffer as ArrayBuffer];
       const videoBlob = new Blob(blobParts, { type: 'video/mp4' });
       const videoUrl = URL.createObjectURL(videoBlob);
+      
+      // Clean up output file
+      await safeDeleteFile(ffmpeg, 'output.mp4');
 
+      console.log('[Video] Complete!');
       setState(prev => ({
         ...prev,
         step: 'complete',
@@ -248,11 +370,11 @@ export function useVideoGeneration() {
       }));
 
     } catch (error) {
-      console.error('Video generation failed:', error);
+      console.error('[Video] Generation failed:', error);
       setState(prev => ({
         ...prev,
         step: 'error',
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
+        error: error instanceof Error ? error.message : 'Bilinmeyen bir hata oluştu',
       }));
     }
   }, [puter, loadFFmpeg]);
@@ -265,7 +387,7 @@ export function useVideoGeneration() {
       step: 'idle',
       progress: 0,
       currentScene: 0,
-      totalScenes: 12,
+      totalScenes: SCENE_COUNT,
       scenes: [],
     });
   }, [state.videoUrl]);
