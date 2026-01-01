@@ -77,7 +77,7 @@ Example: ["Scene 1 prompt...", "Scene 2 prompt...", ...]`;
       ? `Main Theme: ${mainPrompt}\n\nScript/Narration:\n${script}\n\nGenerate 12 cinematic scene prompts that match this narrative.`
       : `Main Theme: ${mainPrompt}\n\nGenerate 12 cinematic scene prompts that tell a visual story around this theme.`;
 
-    const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { model: 'claude-3-5-sonnet' });
+    const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { model: 'gpt-4o' });
     
     try {
       const content = response.message.content;
