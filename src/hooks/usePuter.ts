@@ -90,21 +90,47 @@ Example: ["Scene 1 prompt...", "Scene 2 prompt...", ...]`;
       ? `Main Theme: ${mainPrompt}\n\nScript/Narration:\n${script}\n\nGenerate 12 cinematic scene prompts that match this narrative.`
       : `Main Theme: ${mainPrompt}\n\nGenerate 12 cinematic scene prompts that tell a visual story around this theme.`;
 
-    // Using gpt-5-nano as per Puter.js docs (default model)
-    const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { model: 'gpt-5-nano' });
-    
     try {
+      console.log('[Puter] Calling ai.chat for scene prompts...');
+      
+      // Use claude-3-5-sonnet as fallback - more reliable than gpt-5-nano
+      const response = await window.puter.ai.chat(`${systemPrompt}\n\n${userPrompt}`, { 
+        model: 'claude-3-5-sonnet' 
+      });
+      
+      console.log('[Puter] AI response received:', typeof response, response);
+      
+      if (!response) {
+        throw new Error('No response from AI chat provider');
+      }
+      
       // Handle both object response and string response
-      const content = typeof response === 'string' ? response : response.message.content;
+      let content: string;
+      if (typeof response === 'string') {
+        content = response;
+      } else if (response.message?.content) {
+        content = response.message.content;
+      } else {
+        console.error('[Puter] Unexpected response format:', response);
+        throw new Error('Unexpected response format from AI');
+      }
+      
       // Extract JSON array from response
       const jsonMatch = content.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        console.log('[Puter] Parsed prompts:', parsed.length);
+        return parsed;
       }
-      throw new Error('No valid JSON array found');
-    } catch {
-      console.error('Failed to parse scene prompts, using fallback');
-      return Array(12).fill(mainPrompt).map((p, i) => `Scene ${i + 1}: ${p}`);
+      
+      throw new Error('No valid JSON array found in response');
+    } catch (error) {
+      console.error('[Puter] Scene prompt generation failed:', error);
+      // Return fallback prompts based on main prompt
+      console.log('[Puter] Using fallback prompts');
+      return Array(12).fill(null).map((_, i) => 
+        `${mainPrompt}, scene ${i + 1} of 12, cinematic composition, dramatic lighting, 9:16 vertical format, high quality`
+      );
     }
   }, [ensurePuter]);
 
